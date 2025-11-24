@@ -1,0 +1,121 @@
+Developing a complete KPI monitoring agent designed to observe systems supporting Policy Control Function (PCF) traffic requires interacting with the platform's core observability tools, such as Prometheus/Grafana (for metrics and KPIs) and the underlying data services (UDR, cnDBTier).
+Since your agent will likely be monitoring the performance of the Unified Data Repository (UDR) and its associated components as they handle PCF data, the focus should be on Provisioning Traffic and Signaling Traffic KPIs, system resource health, and specific alerts.
+Here are the details derived from the sources to drive your logic, categorized by data type:
+
+--------------------------------------------------------------------------------
+I. Core KPI Monitoring Logic (Metrics)
+The KPIs for the UDR system (which stores PCF data) are typically derived from metrics collected by Prometheus. Your agent's logic must query these metrics to calculate the required KPIs.
+A. Provisioning Traffic KPIs (For PCF Data Updates)
+PCF provisioning traffic handles the creation, retrieval, modification, and deletion of PCF data (AM data, SM data, and UE Policy Set). This traffic is handled by the provisioning ingress gateway (ingressgateway-prov) and the provisioning data repository service (nudr-dr-provservice).
+KPI Category
+Measurement Focus
+Metric/Logic Reference
+Success Rate (2xx)
+Measures the percentage of successful provisioning traffic.
+Calculated using the ratio of successful responses (Status=~"2.*") to total requests on the ingressgateway-prov.
+Request Rate (TPS)
+Measures the Transactions Per Second (TPS) of provisioning traffic, broken down by HTTP method (GET, PUT, POST, DELETE, PATCH) and per pod.
+Calculated using irate(oc_ingressgateway_http_requests_total{container="ingressgateway-prov"}[5m]).
+Failure Rate
+Measures the percentage of requests that failed (non-2xx responses) at the ingress gateway level.
+Calculated by subtracting successful responses from total requests and dividing by total requests on ingressgateway-prov.
+Response Breakdown
+Detailed failure rate for specific HTTP status codes. Critical errors to monitor include:
+Separate calculations are provided for 408 (Request Timeout), 500 (Internal Server Error), and 503 (Service Unavailable).
+Latency (IGW Total)
+Measures the total processing time (including request, response, and backend processing) for provisioning traffic, in average and percentile.
+Calculated by summing the latency metrics for backend invocation, request processing, and response processing on ingressgateway-prov.
+DB Failure Rate
+Measures database failures specifically related to provisioning traffic on the nudr-dr-provservice backend.
+Requires monitoring metrics that track database operations or connection errors from the backend service.
+B. Signaling Traffic KPIs (Runtime/Session Data)
+PCF also interacts with the UDR for runtime data access (Signaling traffic), handled by the signaling ingress gateway (ingressgateway-sig).
+KPI Category
+Measurement Focus
+Metric/Logic Reference
+Signaling Request Rate (TPS)
+Measures the TPS of signaling traffic per method (e.g., GET) and per pod.
+Calculated using irate(oc_ingressgateway_http_requests_total{container="ingressgateway-sig"}[5m]).
+Signaling Success Rate
+Measures the success percentage for signaling requests.
+Calculated using the ratio of successful responses (Status=~"2.*") to total requests on ingressgateway-sig.
+Signaling Failure Rate
+Measures total non-2xx failures for signaling traffic on the ingress gateway.
+Calculated similarly to Provisioning Failure Rate, but for the ingressgateway-sig container.
+
+--------------------------------------------------------------------------------
+II. System and Health Monitoring Logic
+A complete agent must monitor system health, resource utilization, and potential overload conditions, which directly affect PCF data operations.
+A. Resource Utilization and Congestion
+Monitoring CPU and Memory usage for microservices that process PCF traffic (like Ingress Gateways and Data Repository Services) is crucial.
+• POD Wise CPU Utilization: Measures CPU usage for all deployed pods in the namespace.
+    ◦ Logic: irate(cgroup_cpu_nanoseconds{namespace="$namespace"}[5m]).
+• POD Wise Memory Utilization: Measures memory usage for all deployed pods in the namespace.
+    ◦ Logic: sum(cgroup_memory_bytes{namespace="$namespace"}) by (pod).
+• Overload Level (Backend): Measures the overall load level for backend pods handling signaling or provisioning traffic, potentially indicating resource exhaustion.
+    ◦ Logic: load_level{namespace="$namespace",app_kubernetes_io_instance="$Deployment"} > 0.
+B. Overload Control and Rate Limiting
+The UDR system has mechanisms to protect its ingress gateways from congestion, defined by Danger of Congestion (DOC) and CONGESTED states.
+Health Indicator
+Details
+Relevant Metrics/Configuration
+Pod Congestion State
+Measures the ingress gateway pod state (NORMAL, DOC, or CONGESTED).
+Metrics include oc_ingressgateway_pod_congestion_state and alerts like IngressgatewayPodProtectionCongestedState.
+Rate Limiting Protection
+Tracks requests allowed or rejected when rate limiting is enabled (e.g., for SLF/Signaling traffic).
+KPIs include Congestion Level, Allowed/Rejected Requests, and Overall CPU Usage for the ingressgateway-sig microservice.
+Configurable Thresholds
+Congestion states are based on configurable CPU thresholds. For DOC, onset is typically 80% CPU and abatement is 75%; for CONGESTED, onset is 90% and abatement is 85%.
+These parameters can be configured via REST API or CNC Console.
+C. NF Scoring (Aggregated Health Status)
+For a complete monitoring agent, the NF Scoring feature provides a single, quantitative health score for the Network Function (NF). This score aggregates several criteria:
+1. TPS (Transaction Per Second): Monitored against a configured maximum TPS (maxTps).
+2. Service Health: Tracks the total running services (upSvcs) against total configured services (totalSvcs).
+3. Signaling Connections: Monitored against a configured maximum number of connections (maxConnections).
+4. Replication Health: Tracks available links/sites.
+5. Active Alerts: Applies weighted penalties based on the severity of active alerts (Critical, Major, Minor).
+6. Custom Criteria: You can define custom metrics for scoring, such as Bulk Import status (nudr_bulk_import_records_processed_total).
+Your agent can fetch the overall NF Score using a GET operation on the NF scoring REST API, which returns a detailed report of calculated scores for each criterion.
+
+--------------------------------------------------------------------------------
+III. Operational and Debugging Logic
+The agent should integrate mechanisms for detection, configuration management, and deep debugging.
+A. Monitoring Alerts
+The agent should monitor the Prometheus infrastructure for critical alerts related to PCF functions, as these indicate immediate issues.
+PCF/Provisioning Related Alerts
+Severity/Context
+OcudrProvisioningTransactionErrorRateAbove50Percent
+Critical alert when transaction error rate exceeds 50%.
+OcudrTransactionErrorRateAbove1Percent/10Percent
+Alerts tracking general ingress error rates for transactions.
+NFScoreCalculationFailed
+Indicates a failure in calculating the overall NF health score.
+PVCFullForBulkImport/PVCFullForUDRExport
+Critical alerts indicating storage limits are reached for the export or bulk import tools, preventing data operations.
+BulkImportTransferOutFailed
+Major alert indicating failure to transfer result logs from PVC to a remote server after bulk provisioning.
+NudrServiceDown/NudrProvServiceDown
+Indicates essential microservices (DR Service or Provisioning Service) are unavailable.
+B. Log Analysis and Tracing
+For troubleshooting failures identified by KPIs or Alerts, the agent needs access to granular logs.
+• Provisioning Log Format: Provisioning logs adhere to a key-value pair format, including fields such as timeStamp, logType, correlationId (to identify the transaction), nfInstanceId, and method.
+• Subscriber Activity Logging: If enabled, the system generates logs for 5G signaling traffic (SBI), Diameter traffic (Sh Interface), and Provisioning traffic. These logs contain subscriber details and actions (e.g., "Received PUR msg," "Schema Validation Successful").
+• Tracing: The system supports tracing enhancements to track requests across microservices using Jaeger and features logging enhancements for traceability using ocLogId.
+• Collection Tool: For collecting logs when issues persist, the standard recommended action is to use the CNC NF Data Collector tool.
+C. PCF Configuration and Management
+If your agent is designed to verify configuration settings related to PCF data processing:
+• Bulk Provisioning: The Bulk Import tool processes CSV files to provision PCF, SLF, EIR, and 4G Policy subscribers. The CSV format includes keyType, keyValue, operationType (CREATE, MODIFY, DELETE, PATCH), nfType (PCF or PCF-VSA for 4G Policy data), and the jsonPayload.
+• Provisioning Interface: PCF data can be provisioned using REST/JSON APIs (for 4G and 5G policy data) or managed via the CNC Console GUI interface.
+• NF Type Validation: The agent can confirm that the system correctly identifies PCF traffic by checking the User-Agent Header Validation settings, where PCF is a defined consumer NF type.
+By integrating these metrics, alert conditions, and configuration points, your monitoring agent can achieve comprehensive KPI coverage and provide detailed diagnostics for the performance of PCF interactions with the core data services.
+
+--------------------------------------------------------------------------------
+Analogy:
+Developing this KPI monitoring agent is like building a highly specialized diagnostic sensor suite for an intensive care unit (ICU). The PCF system is the patient, and the UDR/cnDBTier infrastructure is the life support machinery.
+The agent doesn't just check the patient's heart rate (Total TPS); it constantly monitors:
+• Input/Output Flow (KPIs): Is the IV line (Provisioning traffic) delivering the correct dosage (Success Rate)? How long does the infusion take (Latency)? If there's a problem, is the pump clogged (503 Service Unavailable) or did the computer crash (500 Internal Error)?
+• Machine Vitals (System Health): Are the machine's fans running too high (CPU Congestion)? Is the oxygen tank nearly empty (PVC Full)?
+• Centralized Scoring (NF Scoring): What is the patient’s overall, aggregated health score (NF Score) based on all these factors?
+• Incident Reports (Logs/Alerts): If a vital dips, the system flags a critical alert, allowing the agent to immediately look up the detailed, time-stamped activity log (ocLogId) to see exactly which procedure caused the failure.
+Your agent transforms raw data streams (metrics) into actionable health information, allowing operators (or automated scripts) to manage the stability of the PCF environment.
